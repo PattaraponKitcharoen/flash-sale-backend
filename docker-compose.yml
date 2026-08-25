@@ -1,43 +1,98 @@
-version: '3.8'
 services:
   postgres:
-    image: postgres:15
+    image: postgres:16-alpine
     environment:
-      POSTGRES_USER: admin
-      POSTGRES_PASSWORD: password
-      POSTGRES_DB: flashsale
+      POSTGRES_USER: ${DB_USER:-admin}
+      POSTGRES_PASSWORD: ${DB_PASS:-password}
+      POSTGRES_DB: ${DB_NAME:-flashsale}
+    command:
+      - postgres
+      - -c
+      - max_connections=300
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - synchronous_commit=off
     ports:
       - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-admin} -d ${DB_NAME:-flashsale}"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
 
   redis:
     image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "no", "--save", ""]
     ports:
       - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
 
-  api1: &api-template
+  # One-shot: creates the schema and loads seed/products.json, then exits.
+  seed:
     build: .
+    command: ["node", "dist/seed/seed.js"]
+    env_file: .env
     environment:
-      - DB_HOST=postgres
-      - DB_USER=admin
-      - DB_PASS=password
-      - DB_NAME=flashsale
-      - REDIS_HOST=redis
+      DB_HOST: postgres
+      REDIS_HOST: redis
     depends_on:
-      - postgres
-      - redis
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: "no"
+
+  api1: &api
+    build: .
+    command: ["node", "dist/main.js"]
+    env_file: .env
+    environment:
+      DB_HOST: postgres
+      REDIS_HOST: redis
+      NODE_ENV: production
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+    restart: unless-stopped
 
   api2:
-    <<: *api-template
+    <<: *api
   api3:
-    <<: *api-template
+    <<: *api
+
+  # Runs in its own container so queue processing never steals CPU from the
+  # HTTP path. Also serves Bull-Board on :3001.
+  worker:
+    <<: *api
+    command: ["node", "dist/worker-main.js"]
+    ports:
+      - "3001:3001"
 
   nginx:
     image: nginx:alpine
     volumes:
-      - ./nginx.conf:/etc/nginx/nginx.conf
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
     ports:
       - "80:80"
     depends_on:
       - api1
       - api2
       - api3
+    restart: unless-stopped
+
+  # Opt-in load generator: `docker compose --profile loadtest run --rm k6`
+  k6:
+    image: grafana/k6:latest
+    profiles: ["loadtest"]
+    volumes:
+      - ./k6:/scripts:ro
+    environment:
+      BASE_URL: http://nginx
+    entrypoint: ["k6", "run", "/scripts/loadtest.js"]
+    depends_on:
+      - nginx
