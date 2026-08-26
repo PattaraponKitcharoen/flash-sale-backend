@@ -112,10 +112,18 @@ Useful environment variables:
 k6 run -e BASE_URL=http://<other-team-host> k6/loadtest.js
 ```
 
-The script mints 500 JWTs in `setup()` (so authentication is excluded from the
-measurements), then runs 1,000 concurrent readers against `/products` and 500
-concurrent writers against `/orders`. Every fifth user fires three simultaneous
-requests to exercise the duplicate protection.
+The script mints 500 JWTs in `setup()`, so authentication is excluded from the
+measurements. Both scenarios are then fixed work rather than fixed duration,
+which makes the elapsed time itself a result:
+
+- **read**: 1,000 concurrent users x `READ_ITERATIONS` requests (default 100)
+- **write**: 500 concurrent users against `p-1001`, every fifth one firing
+  three simultaneous requests to exercise the duplicate protection
+
+The summary ends with a `WORKLOAD COMPLETION TIME` block reporting how long
+each scenario took and the throughput it sustained. Tune a run with
+`READ_ITERATIONS`, `READ_VUS`, `READ_LIMIT`, `READ_PAGES`, `USER_COUNT`, and
+`TARGET_PRODUCT`.
 
 ## Verifying data integrity after a run
 
